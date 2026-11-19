@@ -1,0 +1,7 @@
+scenario,retained_dec2026,net_revenue_2026,contribution_2026,contribution_age24plus,vs_final_pct
+final (undamped calendar trend),1919.52,2088609.38,1050103.65,158280.83,0.00
+calendar trend damped tau=12,1919.52,2076602.82,1033864.40,154455.01,-1.55
+no calendar trend,1919.52,2008683.61,946464.57,141770.09,-9.87
+cohort trend instead of offsets,2043.22,2167765.57,1089983.85,158050.92,3.80
+hazard x0.8 at ages 24-35,1933.33,2093791.31,1052773.90,160951.08,0.25
+hazard x1.2 at ages 24-35,1906.06,2083527.87,1047485.26,155662.45,-0.25
