@@ -1,5 +1,13 @@
 # Studio North team forecast: sBG retention × structural customer economics (ensemble)
 
+## Summary
+
+This model predicts how much profit (contribution) Studio North's existing customers will generate in 2026: **$1,050,473** in total. It does this by forecasting, month by month, how many members stay subscribed, how many move up to the premium plan and how many add-ons they buy.
+
+On past data it was tested by hiding the most recent months and checking its predictions against what actually happened. It missed by about **4–5%** on average, compared with 28–31% for the challenge's example model.
+
+The best customers are people who joined to **build a skill** and came through a **partner**. About 64% of build_skill members are still active, and they have generated $237 each so far. Members who joined to **save time** cancel at twice the rate. Age, household type and region make no difference.
+
 Entry for the Studio North LTV holdout challenge (FAQ 8). It forecasts expected retained members, net revenue and contribution for the 24 existing acquisition cohorts × 4 channel/need cells for January–December 2026 (1,152 grid rows), using only observations through December 31, 2025.
 
 This target is **remaining contribution over the next twelve calendar months**, not the report's contribution LTV over each cohort's first twelve receipts. Every cohort gets twelve future months; their ages differ (1–12 for the December 2025 cohort, 24–35 for January 2024).
