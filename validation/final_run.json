@@ -1,0 +1,12 @@
+{
+  "validator": "cohort_lab.challenge.validate_predictions (tools 6eb69dc)",
+  "status": "passed",
+  "rows": 1152,
+  "future_outcomes_read": false,
+  "prediction_sha256": "cbb2f5a7d86180c51be6de3defd0c8134986f3a1270c8166806d6177ce9962d0",
+  "byte_identical_reruns": true,
+  "elapsed_seconds_model": 1.13,
+  "seed": 20261116,
+  "contribution_2026": 1050472.62,
+  "command": "uv run --frozen python main.py --data-dir INPUTS --prediction-grid prediction_grid.csv --output OUTPUT --seed 20261116"
+}

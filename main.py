@@ -32,7 +32,14 @@ CELL = ['channel','primary_need']
 
 # Final configuration (chosen by chronological backtest; see README).
 CONFIG = {'cohort_trend': False, 'calendar_trend': True, 'trend_ridge': 1.0, 'cohort_effects': True, 'effect_ridge': 20.0,
-          'calendar_damping_tau': None}
+          'calendar_damping_tau': None, 'economics': 'loglinear', 'blend_weight': 0.5,
+          'addon_terms': ('logage', 'age', 'cal'), 'upgrade_terms': ('logage',),
+          'addon_link': 'log', 'cohort_costs': True, 'effect_prior': 'zero', 'ensemble': None}
+# Final submission: equal-weight ensemble of the two backtest-selected specifications.
+MEMBER_LOGLINEAR = {'effect_prior': 'zero', 'effect_ridge': 20.0, 'economics': 'loglinear'}
+MEMBER_STRUCTURAL = {'effect_prior': 'rw', 'effect_ridge': 50.0, 'economics': 'structural', 'addon_link': 'linear',
+                     'addon_terms': ('age', 'cal'), 'upgrade_terms': ('logage', 'cal')}
+CONFIG['ensemble'] = [MEMBER_LOGLINEAR, MEMBER_STRUCTURAL]
 
 
 # ---------------------------------------------------------------- observed panel
@@ -93,7 +100,7 @@ def _log_surv(la, lb, t):
 
 
 def fit_retention(panel: pd.DataFrame, cohort_trend: bool, ridge: float,
-                  cohort_effects: bool = False, effect_ridge: float = 5.0) -> dict:
+                  cohort_effects: bool = False, effect_ridge: float = 5.0, effect_prior: str = 'zero') -> dict:
     p = panel.sort_values(['cohort_month','channel','primary_need','age_month']).copy()
     p['prev'] = p.groupby(['cohort_month','channel','primary_need']).n_retained.shift()
     tr = p[p.prev.notna() & (p.prev > 0)]
@@ -123,7 +130,12 @@ def fit_retention(panel: pd.DataFrame, cohort_trend: bool, ridge: float,
         la, lb = unpack(x)
         a, b = np.exp(la), np.exp(lb)
         h = np.clip(a/(a+b+t-1), 1e-10, 1-1e-10)  # P(churn at age t | alive at t-1)
-        pen = ridge*np.sum(x[2*nc:2*nc+nt]**2) + effect_ridge*np.sum(x[2*nc+nt:]**2)
+        u = x[2*nc+nt:]
+        if effect_prior == 'rw' and len(u) > 1:   # smooth neighbouring cohorts; newest inherits its neighbours
+            pen_u = effect_ridge*np.sum(np.diff(u)**2) + 0.1*np.sum(u**2)
+        else:
+            pen_u = effect_ridge*np.sum(u**2)
+        pen = ridge*np.sum(x[2*nc:2*nc+nt]**2) + pen_u
         return -np.sum(lost*np.log(h) + (prev-lost)*np.log1p(-h)) + pen
 
     x0 = np.r_[np.zeros(nc), np.log(4.0)*np.ones(nc), np.zeros(nt + ne)]
@@ -174,14 +186,168 @@ def fit_economics(panel: pd.DataFrame, calendar_trend: bool) -> dict:
     return {'coefs': coefs, 'design': design}
 
 
+# ---------------------------------------------------------------- structural economics
+BASE = pd.Period('2024-01', 'M').ordinal
+
+
+def _ordinal(periods) -> np.ndarray:
+    return np.array([p.ordinal for p in periods], dtype=float)
+
+
+def acquisitions(tables: dict[str,pd.DataFrame]) -> pd.DataFrame:
+    """Same acquisition rule as build_panel/sql: first positive payment, credited channel."""
+    tx = tables['transactions']
+    pay = tx[(tx.transaction_type=='payment') & (tx.gross_amount.astype(float)-tx.discount_amount.astype(float).fillna(0)>0)].copy()
+    pay['t'] = pd.to_datetime(pay.occurred_at, utc=True)
+    first = pay.sort_values(['person_id','t','transaction_id']).drop_duplicates('person_id')[['person_id','t']]
+    camp = tables['campaign_spend'].groupby('campaign_id', as_index=False).channel.min()
+    acq = (first.merge(tables['people'][['person_id','primary_need','age_band','household_type','region']], on='person_id')
+                .merge(tables['acquisition_attribution'][['person_id','credited_campaign_id','source_type']], on='person_id')
+                .merge(camp, left_on='credited_campaign_id', right_on='campaign_id', how='left'))
+    acq['channel'] = acq.channel.fillna(acq.source_type)
+    acq['cohort'] = acq.t.dt.tz_localize(None).dt.to_period('M')
+    return acq[['person_id','cohort','channel','primary_need','age_band','household_type','region']]
+
+
+def person_months(tables: dict[str,pd.DataFrame], data_as_of: pd.Timestamp) -> pd.DataFrame:
+    """One row per member-month with a paid subscription period (= retained), with plan tier,
+    previous paid tier and that month's subscription / add-on money."""
+    acq = acquisitions(tables)
+    sp = tables['subscription_periods']
+    sp = sp[(pd.to_datetime(sp.renewal_due_at, utc=True) < data_as_of.tz_localize('UTC')) & (sp.renewal_outcome=='paid')].copy()
+    sp['month'] = pd.to_datetime(sp.period_start).dt.to_period('M')
+    pm = sp[['person_id','period_id','month','plan_tier']].merge(acq, on='person_id')
+    pm = pm[pm.month >= pm.cohort].sort_values(['person_id','month'])
+    pm['age_month'] = _ordinal(pm.month) - _ordinal(pm.cohort)
+    pm['cal'] = (_ordinal(pm.month) - BASE)/12
+    pm['cohort_index'] = _ordinal(pm.cohort) - BASE
+    pm['prev_tier'] = pm.groupby('person_id').plan_tier.shift()
+    tx = tables['transactions'].copy()
+    tx = tx[pd.to_datetime(tx.occurred_at, utc=True) < data_as_of.tz_localize('UTC')]
+    tx['month'] = pd.to_datetime(tx.occurred_at, utc=True).dt.tz_localize(None).dt.to_period('M')
+    for c in ['gross_amount','discount_amount','refund_amount','variable_cost']:
+        tx[c] = tx[c].astype(float).fillna(0.0)
+    tx['rev'] = tx.gross_amount - tx.discount_amount
+    pay = tx[tx.transaction_type=='payment']
+    agg = lambda d, p: d.groupby(['person_id','month']).agg(**{p+'rev':('rev','sum'), p+'cost':('variable_cost','sum'),
+                                                               p+'qty':('quantity','sum')})
+    money = agg(pay[pay.charge_type=='subscription'], 'sub_').join(agg(pay[pay.charge_type=='add_on'], 'add_'), how='outer')
+    money = money.join(tx.groupby(['person_id','month']).refund_amount.sum(), how='outer').fillna(0).reset_index()
+    pm = pm.merge(money, on=['person_id','month'], how='left').fillna({c: 0.0 for c in money.columns if c not in ('person_id','month')})
+    return pm, money
+
+
+def _logit_fit(X, y, ridge=1e-3):
+    b = np.zeros(X.shape[1])
+    for _ in range(50):
+        p = 1/(1+np.exp(-X@b)); H = X.T@(X*(p*(1-p))[:,None]) + ridge*np.eye(len(b))
+        s = np.linalg.solve(H, X.T@(y-p) - ridge*b); b += s
+        if np.abs(s).max() < 1e-10: break
+    return b
+
+
+def _poisson_fit(X, y, ridge=1e-3):
+    b = np.zeros(X.shape[1]); b[0] = np.log(max(y.mean(), 1e-6))
+    for _ in range(60):
+        mu = np.exp(X@b); H = X.T@(X*mu[:,None]) + ridge*np.eye(len(b))
+        s = np.linalg.solve(H, X.T@(y-mu) - ridge*b); b += s
+        if np.abs(s).max() < 1e-10: break
+    return b
+
+
+def _segment_design(frame, terms):
+    cols = [np.ones(len(frame)), (frame.primary_need=='save_time').to_numpy(float), (frame.channel=='search').to_numpy(float)]
+    age = np.maximum(frame.age_month.to_numpy(float), 1.0)
+    if 'logage' in terms: cols.append(np.log(age))
+    if 'age' in terms: cols.append(age/12)
+    if 'cal' in terms: cols.append(frame.cal.to_numpy(float) - 1.0)
+    return np.column_stack(cols)
+
+
+def fit_structural(tables, origin: pd.Period, cfg: dict) -> dict:
+    pm, money = person_months(tables, (origin+1).to_timestamp())
+    window = pm[pm.month > origin - 12]          # recent 12 months for prices and unit costs
+    rates = {}
+    for tier in ('standard', 'premium'):
+        w = window[window.plan_tier==tier]
+        q = max(w.add_qty.sum(), 1.0)
+        rates[tier] = {'sub_rev': w.sub_rev.mean(), 'sub_cost': w.sub_cost.mean(),
+                       'add_rev_unit': w.add_rev.sum()/q, 'add_cost_unit': w.add_cost.sum()/q}
+    recent = money[money.month > origin - 12]
+    # subscription price and variable cost are fixed per acquisition cohort x tier in the data:
+    # use each cohort's observed value, else a per-tier linear fit in cohort index
+    sub = pm[pm.sub_rev > 0]
+    rates['by_cohort'] = {}
+    for tier in ('standard', 'premium'):
+        d = sub[sub.plan_tier==tier]
+        cm = d.groupby('cohort_index')[['sub_rev','sub_cost']].mean()
+        X = np.column_stack([np.ones(len(cm)), cm.index.to_numpy(float)])
+        fit = {c: np.linalg.lstsq(X, cm[c].to_numpy(), rcond=None)[0] if len(cm) >= 2 else np.array([rates[tier][c], 0.0])
+               for c in ('sub_rev','sub_cost')}
+        rates['by_cohort'][tier] = {'obs': cm.to_dict('index'), 'fit': fit}
+    rates['refund_ratio'] = float(recent.refund_amount.sum()/max((recent.sub_rev+recent.add_rev).sum(), 1.0))
+    # add-on purchases per retained member-month (Poisson)
+    terms = cfg['addon_terms']
+    rates['addon_terms'] = terms
+    rates['addon_link'] = cfg['addon_link']
+    Xa, ya = _segment_design(pm, terms), pm.add_qty.to_numpy(float)
+    rates['addon_b'] = (_poisson_fit(Xa, ya) if cfg['addon_link'] == 'log'
+                        else np.linalg.lstsq(Xa, ya, rcond=None)[0])
+    # monthly upgrade hazard for members who were standard last paid month
+    up = pm[(pm.prev_tier=='standard')]
+    uterms = cfg['upgrade_terms']
+    rates['upgrade_terms'] = uterms
+    rates['upgrade_b'] = _logit_fit(_segment_design(up, uterms), (up.plan_tier=='premium').to_numpy(float))
+    # premium share among each cell-cohort's survivors at the origin
+    last = pm[pm.month == origin]
+    rates['origin_premium'] = (last.assign(p=(last.plan_tier=='premium').astype(float))
+                                   .groupby([last.cohort.dt.to_timestamp().dt.strftime('%Y-%m-%d'),'channel','primary_need']).p.mean().to_dict())
+    rates['cohort_costs'] = cfg['cohort_costs']
+    return rates
+
+
+def structural_unit_economics(g: pd.DataFrame, rates: dict) -> tuple[np.ndarray, np.ndarray]:
+    """Expected net revenue and contribution per retained member for each grid row."""
+    g = g.sort_values(KEYS).copy()
+    eta = _segment_design(g, rates['addon_terms']) @ rates['addon_b']
+    lam = np.exp(eta) if rates['addon_link'] == 'log' else np.maximum(eta, 0.0)
+    u = 1/(1+np.exp(-_segment_design(g, rates['upgrade_terms']) @ rates['upgrade_b']))
+    g['u'] = u
+    pi = np.empty(len(g))
+    for key, idx in g.groupby(['cohort_month','channel','primary_need']).indices.items():
+        p = rates['origin_premium'].get(key, 0.0)
+        for j in idx:                        # rows are sorted by calendar month within the cell
+            p = 1 - (1-p)*(1-g.u.iat[j]); pi[j] = p
+    S, P = rates['standard'], rates['premium']
+    k = (_ordinal(pd.to_datetime(g.cohort_month).dt.to_period('M')) - BASE)
+    def sub(tier, col):
+        bc = rates['by_cohort'][tier]
+        if not rates.get('cohort_costs', True):
+            return np.full(len(g), rates[tier][col])
+        return np.array([bc['obs'][ki][col] if ki in bc['obs'] else bc['fit'][col][0] + bc['fit'][col][1]*ki for ki in k])
+    rev = pi*(sub('premium','sub_rev') + lam*P['add_rev_unit']) + (1-pi)*(sub('standard','sub_rev') + lam*S['add_rev_unit'])
+    cost = pi*(sub('premium','sub_cost') + lam*P['add_cost_unit']) + (1-pi)*(sub('standard','sub_cost') + lam*S['add_cost_unit'])
+    net = rev*(1 - rates['refund_ratio'])
+    out = pd.DataFrame({'net': net, 'contrib': np.minimum(net - cost, net), 'premium_share': pi, 'addon_rate': lam}, index=g.index)
+    return out
+
+
 # ---------------------------------------------------------------- predict
 def predict(tables: dict[str,pd.DataFrame], prediction_grid: pd.DataFrame, *, seed: int,
             config: dict | None = None) -> pd.DataFrame:
     cfg = CONFIG | (config or {})
+    if cfg.get('ensemble'):  # equal-weight average of member models (keeps monotonicity and contribution <= net)
+        members = [predict(tables, prediction_grid, seed=seed, config=CONFIG | m | {'ensemble': None}).sort_values(KEYS).reset_index(drop=True)
+                   for m in cfg['ensemble']]
+        out = members[0].copy()
+        for c in PREDICTIONS:
+            out[c] = np.mean([m[c].to_numpy() for m in members], axis=0)
+        return out
     grid = prediction_grid.copy(deep=True)
     origin = pd.Period(grid.calendar_month.min(), freq='M') - 1
     panel = build_panel(tables, (origin + 1).to_timestamp())
-    rfit = fit_retention(panel, cfg['cohort_trend'], cfg['trend_ridge'], cfg['cohort_effects'], cfg['effect_ridge'])
+    rfit = fit_retention(panel, cfg['cohort_trend'], cfg['trend_ridge'], cfg['cohort_effects'], cfg['effect_ridge'],
+                         cfg['effect_prior'])
     efit = fit_economics(panel, cfg['calendar_trend'])
 
     g = grid.copy()
@@ -200,10 +366,16 @@ def predict(tables: dict[str,pd.DataFrame], prediction_grid: pd.DataFrame, *, se
     X = efit['design'](g)
     c = efit['coefs']
     npr = np.exp(X @ c['net'])*c['net_smear']
-    margin = np.minimum(np.exp(X @ c['margin'])*c['margin_smear'], 1.0)
+    contrib = npr*np.minimum(np.exp(X @ c['margin'])*c['margin_smear'], 1.0)
+    if cfg['economics'] in ('structural', 'blend'):
+        se = structural_unit_economics(g, fit_structural(tables, origin, cfg)).reindex(g.index)
+        w = 1.0 if cfg['economics'] == 'structural' else cfg['blend_weight']
+        npr = w*se.net.to_numpy() + (1-w)*npr
+        contrib = w*se.contrib.to_numpy() + (1-w)*contrib
+    contrib = np.clip(contrib, 0.0, npr)
     grid['predicted_retained'] = retained
-    grid['predicted_net_revenue'] = retained*npr
-    grid['predicted_contribution'] = retained*npr*margin
+    grid['predicted_net_revenue'] = np.where(retained > 0, retained*npr, 0.0)
+    grid['predicted_contribution'] = np.where(retained > 0, retained*contrib, 0.0)
     return grid[KEYS+EXPOSURES+PREDICTIONS]
 
 

@@ -1,7 +1,9 @@
-scenario,retained_dec2026,net_revenue_2026,contribution_2026,contribution_age24plus,vs_final_pct
-final (undamped calendar trend),1919.52,2088609.38,1050103.65,158280.83,0.00
-calendar trend damped tau=12,1919.52,2076602.82,1033864.40,154455.01,-1.55
-no calendar trend,1919.52,2008683.61,946464.57,141770.09,-9.87
-cohort trend instead of offsets,2043.22,2167765.57,1089983.85,158050.92,3.80
-hazard x0.8 at ages 24-35,1933.33,2093791.31,1052773.90,160951.08,0.25
-hazard x1.2 at ages 24-35,1906.06,2083527.87,1047485.26,155662.45,-0.25
+scenario,contribution_2026,net_revenue_2026,retained_dec2026,contribution_age24plus,vs_final_pct
+final ensemble,1050472.62,2116027.99,1950.97,157656.07,0.00
+member: log-linear economics (previous submission),1050103.65,2088609.38,1919.52,158280.83,-0.04
+member: structural economics,1050841.59,2143446.61,1982.42,157031.31,0.04
+"ensemble, no calendar trend in either member",989213.42,2061873.22,1950.97,148606.15,-5.83
+"ensemble, calendar trend damped (tau=12)",1042353.00,2110024.71,1950.97,155743.16,-0.77
+"ensemble, cohort-tier costs off (12-month tier averages)",1048155.80,2118387.74,1950.97,159249.73,-0.22
+"final ensemble, hazard x0.8 at ages 24-35",1053110.74,2121268.32,1964.68,160294.20,0.25
+"final ensemble, hazard x1.2 at ages 24-35",1047885.40,2110888.73,1937.60,155068.85,-0.25
